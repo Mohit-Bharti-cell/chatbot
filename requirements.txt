@@ -9,3 +9,5 @@ aiofiles
 requests
 pydub
 httpx
+pymongo
+
