@@ -11,5 +11,7 @@ pydub
 httpx
 pymongo
 openai-whisper
+imageio-ffmpeg
+
 
 
