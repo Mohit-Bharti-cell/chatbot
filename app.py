@@ -19,17 +19,32 @@ import shutil
 # ------------------------------
 # FFmpeg path setup (portable)
 # ------------------------------
-FFMPEG_PATH = os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg")
+def get_ffmpeg_path():
+    try:
+        import imageio_ffmpeg as iioff
+        ffmpeg_path = iioff.get_ffmpeg_exe()
+        print(f"✅ Using imageio-ffmpeg binary: {ffmpeg_path}")
+        return ffmpeg_path
+    except Exception as e:
+        print("⚠️ imageio-ffmpeg not available:", e)
 
-if FFMPEG_PATH is None:
-    raise RuntimeError(
-        "❌ FFmpeg not found. Please install FFmpeg and ensure it's in your PATH, "
-        "or set FFMPEG_PATH in your environment."
-    )
+    # check ENV
+    ffmpeg_path = os.getenv("FFMPEG_PATH")
+    if ffmpeg_path and Path(ffmpeg_path).exists():
+        print(f"✅ Using FFMPEG_PATH from env: {ffmpeg_path}")
+        return ffmpeg_path
 
-# Make it discoverable for libraries like whisper
+    # last fallback system ffmpeg
+    ffmpeg_path = shutil.which("ffmpeg")
+    if ffmpeg_path:
+        print(f"✅ Found system ffmpeg: {ffmpeg_path}")
+        return ffmpeg_path
+
+    raise RuntimeError("❌ FFmpeg not found. Please install or set FFMPEG_PATH.")
+
+FFMPEG_PATH = get_ffmpeg_path()
 os.environ["FFMPEG_BINARY"] = FFMPEG_PATH
-print(f"✅ Using FFmpeg at: {FFMPEG_PATH}")
+print(f"🎬 Final FFmpeg path in use: {FFMPEG_PATH}")
 
 # ------------------------------
 # Setup Supabase
