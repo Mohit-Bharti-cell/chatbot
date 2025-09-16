@@ -14,20 +14,22 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from bson import ObjectId
 import whisper
+import shutil
 
 # ------------------------------
-# FFmpeg path setup
+# FFmpeg path setup (portable)
 # ------------------------------
-if os.name == "nt":  # Windows local
-    FFMPEG_PATH = r"C:\Users\abc\Downloads\fftf\ffmpeg-2025-09-04-git-2611874a50-essentials_build\ffmpeg-2025-09-04-git-2611874a50-essentials_build\bin\ffmpeg.exe"
-    if not os.path.exists(FFMPEG_PATH):
-        raise RuntimeError(f"ffmpeg not found at {FFMPEG_PATH}")
-    os.environ["PATH"] += os.pathsep + os.path.dirname(FFMPEG_PATH)
-else:  # Linux / Render
-    FFMPEG_PATH = "ffmpeg"
+FFMPEG_PATH = os.getenv("FFMPEG_PATH") or shutil.which("ffmpeg")
 
-# Whisper requires FFmpeg to be discoverable
+if FFMPEG_PATH is None:
+    raise RuntimeError(
+        "❌ FFmpeg not found. Please install FFmpeg and ensure it's in your PATH, "
+        "or set FFMPEG_PATH in your environment."
+    )
+
+# Make it discoverable for libraries like whisper
 os.environ["FFMPEG_BINARY"] = FFMPEG_PATH
+print(f"✅ Using FFmpeg at: {FFMPEG_PATH}")
 
 # ------------------------------
 # Setup Supabase
