@@ -12,39 +12,14 @@ from gtts import gTTS
 from supabase import create_client
 from dotenv import load_dotenv
 from pymongo import MongoClient
-from bson import ObjectId
 import whisper
-import shutil
+import imageio_ffmpeg  # ✅ new
 
 # ------------------------------
-# FFmpeg path setup (portable)
+# FFmpeg Path (managed by imageio-ffmpeg)
 # ------------------------------
-def get_ffmpeg_path():
-    try:
-        import imageio_ffmpeg as iioff
-        ffmpeg_path = iioff.get_ffmpeg_exe()
-        print(f"✅ Using imageio-ffmpeg binary: {ffmpeg_path}")
-        return ffmpeg_path
-    except Exception as e:
-        print("⚠️ imageio-ffmpeg not available:", e)
-
-    # check ENV
-    ffmpeg_path = os.getenv("FFMPEG_PATH")
-    if ffmpeg_path and Path(ffmpeg_path).exists():
-        print(f"✅ Using FFMPEG_PATH from env: {ffmpeg_path}")
-        return ffmpeg_path
-
-    # last fallback system ffmpeg
-    ffmpeg_path = shutil.which("ffmpeg")
-    if ffmpeg_path:
-        print(f"✅ Found system ffmpeg: {ffmpeg_path}")
-        return ffmpeg_path
-
-    raise RuntimeError("❌ FFmpeg not found. Please install or set FFMPEG_PATH.")
-
-FFMPEG_PATH = get_ffmpeg_path()
-os.environ["FFMPEG_BINARY"] = FFMPEG_PATH
-print(f"🎬 Final FFmpeg path in use: {FFMPEG_PATH}")
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+print(f"✅ Using FFmpeg from: {FFMPEG_PATH}")
 
 # ------------------------------
 # Setup Supabase
@@ -129,40 +104,36 @@ def convert_to_wav(input_path: str) -> str:
 # ------------------------------
 # Routes
 # ------------------------------
-
 @app.post("/start_interview")
 async def start_interview(req: StartRequest):
-    candidate = candidates_collection.find_one({"email": req.email})
-    if not candidate:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Candidate with email {req.email} not found in MongoDB register database"
-        )
+    # check if candidate already exists by email
+    existing = supabase.table("candidates").select("*").eq("email", req.email).execute()
 
-    candidate_id = str(candidate["_id"])  # use string for Supabase
+    if existing.data:
+        candidate_id = existing.data[0]["candidate_id"]
+    else:
+        candidate_id = str(uuid.uuid4())
 
-    existing = supabase.table("candidates").select("*").eq("candidate_id", candidate_id).execute()
-    if not existing.data:
         supabase.table("candidates").insert({
             "candidate_id": candidate_id,
-            "name": candidate.get("name"),
-            "email": candidate.get("email")
+            "name": req.name,
+            "email": req.email
         }).execute()
-        print(f"✅ Candidate synced to Supabase: {candidate_id}")
 
+        candidates_collection.insert_one({
+            "_id": candidate_id,
+            "candidate_id": candidate_id,
+            "name": req.name,
+            "email": req.email
+        })
+        print(f"✅ Candidate saved in Mongo: {candidate_id}, {req.name}, {req.email}")
+
+    # reset session
+    supabase.table("sessions").delete().eq("candidate_id", candidate_id).execute()
     supabase.table("sessions").insert({
         "candidate_id": candidate_id,
         "q_index": 0
     }).execute()
-
-    interviews_collection.insert_one({
-        "candidate_id": ObjectId(candidate_id),
-        "question_index": 0,
-        "question": "Welcome! Let's start your interview.",
-        "answer_text": None,
-        "status": "pending",
-        "answer_audio_url": None
-    })
 
     return {
         "message": "Interview started",
@@ -238,7 +209,7 @@ async def submit_answer(candidate_id: str, question_index: int, file: UploadFile
         text_answer = result.text.strip()
 
         if not text_answer:
-            print("⚠️ Empty transcript, retrying with longer padding...")
+            print("⚠️ Empty transcript, retrying...")
             audio = whisper.pad_or_trim(audio, length=30*16000)
             mel = whisper.log_mel_spectrogram(audio).to(model.device)
             result = whisper.decode(model, mel, options)
@@ -273,22 +244,19 @@ async def submit_answer(candidate_id: str, question_index: int, file: UploadFile
         "answer_audio_url": audio_url
     }).execute()
 
-    qa_entry = [
-        f"Q: {QUESTIONS[question_index]}",
-        f"A: {text_answer}"
-    ]
+    interviews_collection.insert_one({
+        "candidate_id": candidate_id,
+        "question_index": question_index,
+        "question": QUESTIONS[question_index],
+        "answer_text": text_answer,
+        "status": status,
+        "answer_audio_url": audio_url
+    })
+    print(f"✅ Answer saved in Mongo for candidate {candidate_id}, Q{question_index}")
 
-    interviews_collection.update_one(
-        {"candidate_id": ObjectId(candidate_id)},
-        {"$push": {"qa": qa_entry}},
-        upsert=True
-    )
-    print(f"✅ Q/A saved in Mongo for candidate {candidate_id}, Q{question_index}")
-
-    if status == "ok":
-        supabase.table("sessions").update(
-            {"q_index": session["q_index"] + 1}
-        ).eq("candidate_id", candidate_id).execute()
+    supabase.table("sessions").update(
+        {"q_index": session["q_index"] + 1}
+    ).eq("candidate_id", candidate_id).execute()
 
     return {
         "answer_text": text_answer,
@@ -305,23 +273,21 @@ async def finish_interview(candidate_id: str):
 @app.get("/get_answers/{candidate_id}")
 async def get_answers(candidate_id: str):
     clean_id = candidate_id.strip()
-    try:
-        doc = interviews_collection.find_one({"candidate_id": ObjectId(clean_id)})
-    except:
-        doc = None
-
-    if doc and "qa" in doc:
-        return {"candidate_id": clean_id, "qa": doc["qa"]}
-
     res = supabase.table("interviews").select("question, answer_text").eq("candidate_id", clean_id).execute()
+
     if not res.data:
-        return {"candidate_id": clean_id, "qa": []}
+        return {"candidate_id": clean_id, "answers": []}
 
     transcript = []
     for row in res.data:
-        transcript.append([f"Q: {row['question']}", f"A: {row['answer_text']}"])
+        transcript.append(f"Q: {row['question']}")
+        transcript.append(f"A: {row['answer_text']}")
 
-    return {"candidate_id": clean_id, "qa": transcript}
+    return {
+        "candidate_id": clean_id,
+        "answers": res.data,
+        "transcript": transcript
+    }
 
 # ------------------------------
 # Static files
